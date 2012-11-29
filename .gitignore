@@ -22,3 +22,4 @@ public/assets
 cms.war
 Gemfile.lock
 /coverage/
+*~
