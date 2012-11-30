@@ -46,6 +46,11 @@ CmsRails::Application.routes.draw do
       get 'tooltip'
       get 'delete'
     end
+    collection do
+      get 'import'
+      post 'import'
+      get 'export'
+    end
   end
 
   resources :system_systems, :as => 'flow_system_systems', :only => [:index, :create] do
@@ -91,6 +96,14 @@ CmsRails::Application.routes.draw do
   end
 
   resources :markets, :as => 'flow_markets', :only => [:index, :show, :new, :edit, :create, :update, :destroy] do
+    member do
+      get 'delete'
+      get 'tooltip'
+      get 'delete'
+    end
+  end
+
+  resources :risky_attributes, :as => 'flow_risky_attributes', :only => [:index, :show, :new, :edit, :create, :update, :destroy] do
     member do
       get 'delete'
       get 'tooltip'

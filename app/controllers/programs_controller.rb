@@ -16,7 +16,7 @@ class ProgramsController < BaseObjectsController
 
   SECTION_MAP = Hash[*%w(Section\ Code slug Section\ Title title Section\ Description description Section\ Notes notes Created created_at Updated updated_at)]
 
-  CONTROL_MAP = Hash[*%w(Control\ Code slug Title title Description description Type type Kind kind Means means Version version Start start_date Stop stop_date URL url Documentation documentation_description Verify-Frequency verify_frequency Created created_at Updated updated_at)]
+  CONTROL_MAP = Hash[*%w(Control\ Code slug Title title Description description Type type Kind kind Means means Version version Start start_date Stop stop_date URL url Documentation documentation_description Verify-Frequency verify_frequency Executive\ Owner executive Created created_at Updated updated_at)]
 
   # FIXME: Decide if the :section, controls, etc.
   # methods should be moved, and what access controls they
@@ -67,18 +67,30 @@ class ProgramsController < BaseObjectsController
 
   def export_controls
     respond_to do |format|
+      format.html do
+        render :layout => 'export_modal', :locals => { :program => @program }
+      end
       format.csv do
         self.response.headers['Content-Type'] = 'text/csv'
         headers['Content-Disposition'] = "attachment; filename=\"#{@program.slug}-controls.csv\""
         self.response_body = Enumerator.new do |out|
-          out << CSV.generate_line(%w(Type Code))
+          out << CSV.generate_line(%w(Type Program\ Code))
           values = %w(Program\ Code).map { |key| @program.send(PROGRAM_MAP[key]) }
           values.unshift("Controls")
           out << CSV.generate_line(values)
           out << CSV.generate_line([])
           out << CSV.generate_line(CONTROL_MAP.keys)
           @program.controls.each do |s|
-            values = CONTROL_MAP.keys.map { |key| s.send(CONTROL_MAP[key]) }
+            values = CONTROL_MAP.keys.map do |key|
+              field = CONTROL_MAP[key]
+              case field
+              when 'executive'
+                object_person = s.object_people.detect {|x| x.role == 'executive'}
+                object_person ? object_person.person.email : ''
+              else
+                s.send(field)
+              end
+            end
             out << CSV.generate_line(values)
           end
         end
@@ -88,6 +100,9 @@ class ProgramsController < BaseObjectsController
 
   def export
     respond_to do |format|
+      format.html do
+        render :layout => 'export_modal', :locals => { :program => @program }
+      end
       format.csv do
         self.response.headers['Content-Type'] = 'text/csv'
         headers['Content-Disposition'] = "attachment; filename=\"#{@program.slug}.csv\""
@@ -109,10 +124,6 @@ class ProgramsController < BaseObjectsController
     end
   end
 
-  def render_import_error(message=nil)
-    render 'import_error', :layout => false, :locals => { :message => message }
-  end
-
   def import_controls
     upload = params["upload"]
     if upload.present?
@@ -125,7 +136,11 @@ class ProgramsController < BaseObjectsController
         @errors = import[:errors]
         @creates = import[:creates]
         @updates = import[:updates]
-        render 'import_controls_result', :layout => false
+        if params[:confirm].present? && !@errors.any? && !@messages.any?
+          render :json => { :location => flow_program_path(@program) }
+        else
+          render 'import_controls_result', :layout => false
+        end
       rescue CSV::MalformedCSVError, ArgumentError => e
         log_backtrace(e)
         render_import_error("Not a recognized file.")
@@ -145,14 +160,18 @@ class ProgramsController < BaseObjectsController
     if upload.present?
       begin
         file = upload.read.force_encoding('utf-8')
-        import = read_import(CSV.parse(file))
+        import = read_import_sections(CSV.parse(file))
         @messages = import[:messages]
         do_import(import, params[:confirm].blank?)
         @warnings = import[:warnings]
         @errors = import[:errors]
         @creates = import[:creates]
         @updates = import[:updates]
-        render 'import_result', :layout => false
+        if params[:confirm].present? && !@errors.any? && !@messages.any?
+          render :json => { :location => flow_program_path(@program) }
+        else
+          render 'import_result', :layout => false
+        end
       rescue CSV::MalformedCSVError, ArgumentError => e
         log_backtrace(e)
         render_import_error("Not a recognized file.")
@@ -194,6 +213,8 @@ class ProgramsController < BaseObjectsController
       attrs.delete('updated_at')
       attrs.delete('type')
 
+      handle_import_person(attrs, 'executive', import[:warnings][i])
+
       handle_option(attrs, :kind, import[:messages], :control_kind)
       handle_option(attrs, :means, import[:messages], :control_means)
       handle_option(attrs, :verify_frequency, import[:messages])
@@ -208,14 +229,17 @@ class ProgramsController < BaseObjectsController
         control = Control.find_by_slug(slug)
       end
 
-      if control
-        control.assign_attributes(attrs, :without_protection => true)
-        import[:updates] << slug
-      else
-        control = Control.new
-        control.assign_attributes(attrs, :without_protection => true)
+      control ||= Control.new
+
+      handle_import_object_person(control, attrs, 'executive')
+
+      control.assign_attributes(attrs, :without_protection => true)
+
+      if control.new_record?
         control.program = @program
         import[:creates] << slug
+      else
+        import[:updates] << slug
       end
       @controls << control
       import[:errors][i] = control.errors unless control.valid?
@@ -267,77 +291,41 @@ class ProgramsController < BaseObjectsController
 
     raise ImportException.new("There must be at least 3 input lines") unless rows.size >= 4
 
-    program_headers = trim_array(rows.shift).map do |heading|
-      if heading == "Type"
-        key = 'type'
-      else
-        key = PROGRAM_MAP[heading]
-        import[:messages] << "invalid program heading #{heading}" unless key
-      end
-      key
-    end
+    program_headers = read_import_headers(import, PROGRAM_MAP, "program", rows)
 
     program_values = rows.shift
 
-    raise ImportException.new("First column must be Type") unless program_headers.shift == "type"
-    raise ImportException.new("Type must be Controls") unless program_values.shift == "Controls"
-
     import[:program] = Hash[*program_headers.zip(program_values).flatten]
+
+    validate_import_type(import[:program], "Controls")
+    validate_import_slug(import[:program], "Program", @program.slug)
 
     raise ImportException.new("There must be an empty separator row") unless trim_array(rows.shift) == []
 
-    control_headers = trim_array(rows.shift).map do |heading|
-      key = CONTROL_MAP[heading]
-      import[:messages] << "invalid control heading #{heading}" unless key
-      key
-    end
-
-    import[:controls] = rows.map do |control_values|
-      Hash[*control_headers.zip(control_values).flatten]
-    end
+    read_import(import, CONTROL_MAP, "control", rows)
 
     import
   end
 
-  def read_import(rows)
+  def read_import_sections(rows)
     import = { :messages => [] }
 
     raise ImportException.new("There must be at least 3 input lines") unless rows.size >= 4
 
-    program_headers = trim_array(rows.shift).map do |heading|
-      if heading == "Program Type"
-        key = 'type'
-      else
-        key = PROGRAM_MAP[heading]
-        import[:messages] << "invalid program heading #{heading}" unless key
-      end
-      key
-    end
+    program_headers = read_import_headers(import, PROGRAM_MAP, "program", rows)
 
     program_values = rows.shift
 
-    raise ImportException.new("First column must be Type") unless program_headers.shift == "type"
-    raise ImportException.new("Type must be Program") unless program_values.shift == "Program"
-
     import[:program] = Hash[*program_headers.zip(program_values).flatten]
+
+    validate_import_type(import[:program], "Program")
+    validate_import_slug(import[:program], "Program", @program.slug)
 
     raise ImportException.new("There must be an empty separator row") unless trim_array(rows.shift) == []
 
-    section_headers = trim_array(rows.shift).map do |heading|
-      key = SECTION_MAP[heading]
-      import[:messages] << "invalid section heading #{heading}" unless key
-      key
-    end
-
-    import[:sections] = rows.map do |section_values|
-      Hash[*section_headers.zip(section_values).flatten]
-    end
+    read_import(import, SECTION_MAP, "section", rows)
 
     import
-  end
-
-  def perform_import(rows, actual)
-    puts rows.size
   end
 
   def sections
