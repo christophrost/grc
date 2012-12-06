@@ -70,8 +70,8 @@ describe ProgramsController do
       @reg.audit_frequency = Option.create(:title => "Often", :role => 'audit_frequency')
       @reg.save
       get 'export', :id => @reg.id, :format => :csv
-      # program titles, 1 program, blank line, section titles, 1 section
-      response.body.split("\n").size.should == 5
+      # program titles, 1 program, 2 blank lines, section titles, 1 section
+      response.body.split("\n").size.should == 6
       (response.body =~ /1 Week/).should_not be_nil
       (response.body =~ /Often/).should_not be_nil
     end
@@ -119,15 +119,20 @@ describe ProgramsController do
   context "import controls" do
     before :each do
       login({}, { :role => 'superuser' })
+      @sys5 = FactoryGirl.create(:system, :title => 'System 1', :slug => 'SYS5', :description => 'x')
     end
 
     it "should do import" do
       post 'import_controls', :id => @reg.id, :upload => fixture_file_upload("/CONTROLS.csv"), :confirm => "true"
       ctl = Control.find_by_slug("CTL1")
       ctl.description.should == "This is Control 1"
+      ctl.documents.should == [Document.find_by_link('file://file/xyz')]
       ctl.object_people.size.should == 1
-      ctl.object_people[0].role.should == 'executive'
-      ctl.object_people[0].person.email.should == 'a@t.com'
+      op = ctl.object_people.first
+      op.role.should == 'operator'
+      op.person.email.should == 'a@b.com'
+      Control.find_by_slug('CTL2').categories.map {|x| x.name}.should == ['cat1']
+      Control.find_by_slug('CTL2').systems.should == [System.find_by_slug('SYS2'), @sys5]
     end
   end
 
@@ -142,8 +147,7 @@ describe ProgramsController do
     it "should export" do
       get 'export_controls', :id => @creg.id, :format => :csv
       # system titles, system data
-      response.body.split("\n").size.should == 6
-      response.body.should match(@person.email)
+      response.body.split("\n").size.should == 7
     end
   end
 
