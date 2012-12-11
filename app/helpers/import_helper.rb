@@ -33,7 +33,16 @@ module ImportHelper
     headers = read_import_headers(import, import_map, object_name, rows)
 
     import[object_name.pluralize.to_sym] = rows.map do |values|
-      Hash[*headers.zip(values).flatten]
+      row = {}
+      headers.zip(values).each do |k, v|
+        if row.has_key?(k)
+          row[k] = "#{row[k]},#{v}"
+        else
+          row[k] = v
+        end
+      end
+      row['slug'] = row['slug'].upcase if row.has_key?('slug') && !row['slug'].nil?
+      row
     end
   end
 
@@ -41,12 +50,16 @@ module ImportHelper
     render '/error/import_error', :layout => false, :locals => { :message => message }
   end
 
-  def handle_import_person(attrs, key, warning)
-    if attrs[key].present?
+  def handle_import_person(attrs, key, warnings)
+    unless attrs[key].nil?
       if attrs[key].include?('@')
         attrs[key] = Person.find_or_create_by_email!({:email => attrs[key]})
+      elsif attrs[key] == ""
+        attrs[key] = nil
       else
-        warning[key.to_sym] << "invalid email"
+        attrs[key] = nil
+        warnings[key.to_sym] ||= []
+        warnings[key.to_sym] << "invalid email"
       end
     end
   end
@@ -65,20 +78,27 @@ module ImportHelper
     end
   end
 
-  def handle_import_category(object, attrs, key, category_scope_id)
-    category = attrs.delete(key)
+  def strip_split(str)
+      str.split(',').map {|x| x.strip}.reject {|x| x.blank?}
+  end
 
-    if category.present?
-      categories = category.split(',').map {|category| Category.find_or_create_by_name({:name => category, :scope_id => category_scope_id})}
-      object.categories = categories
+  def handle_import_category(object, attrs, key, category_scope_id)
+    category_string = attrs.delete(key)
+
+    if category_string.present?
+      names = strip_split(category_string)
+      categories = names.map {|category| Category.find_or_create_by_name({:name => category, :scope_id => category_scope_id})}
+      object.categories = object.categories + categories
     end
   end
 
   def handle_import_systems(object, attrs, key)
     systems_string = attrs.delete(key)
 
-    if systems_string.present?
-      systems = systems_string.split(',').map do |slug|
+    unless systems_string.nil?
+      slugs = strip_split(systems_string)
+      slugs = slugs.map {|x| x.upcase}
+      systems = slugs.map do |slug|
         system = System.find_or_create_by_slug({:slug => slug, :title => slug, :infrastructure => false})
         system
       end
@@ -86,9 +106,32 @@ module ImportHelper
     end
   end
 
+  def handle_boolean(attrs, key)
+    if attrs.has_key?(key)
+      attrs[key] = (attrs[key] == 'yes' || attrs[key] == '1' || attrs[key] == 'true')
+    end
+  end
+
+  def handle_import_sub_systems(object, attrs, key)
+    systems_string = attrs.delete(key)
+
+    unless systems_string.nil?
+      slugs = strip_split(systems_string)
+      slugs = slugs.map {|x| x.upcase}
+      systems = slugs.map do |slug|
+        system = System.find_or_create_by_slug({:slug => slug, :title => slug, :infrastructure => false})
+        system
+      end
+      object.sub_systems = systems
+    end
+  end
+
   def handle_import_relationships(object, related_string, related_class, relationship_type)
+    return unless object.id
     if related_string.present?
-      relateds = related_string.split(',').each do |slug|
+      slugs = strip_split(related_string)
+      slugs = slugs.map {|x| x.upcase}
+      relateds = slugs.each do |slug|
         related = related_class.find_or_create_by_slug({:slug => slug, :title => slug})
         attrs = {:source_id => object.id, :source_type => object.class.name, :destination_id => related.id, :destination_type => related_class.name, :relationship_type_id => relationship_type}
         unless Relationship.exists?(attrs)
@@ -118,8 +161,8 @@ module ImportHelper
         link = "file:" + link
       end
       { :description => ($1.nil? ? '' : $1) + ($4.nil? ? '' : $4),
-        :link => link, :title => ($3.present? ? $3 : link).strip }
-    end
+        :link => link, :title => $3.present? ? $3.strip : link }
+    end.reject {|x| x[:link].blank?}
   end
 
   def handle_import_document_reference(object, attrs, key, warnings)
